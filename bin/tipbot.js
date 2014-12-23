@@ -361,12 +361,7 @@ client.addListener('message', function(from, channel, message) {
             }
 			var user = from.toLowerCase();
             var unconfirmed_balance = typeof(unconfirmed_balance) == 'object' ? unconfirmed_balance.result : unconfirmed_balance;
-
-<<<<<<< HEAD
             client.say(channel, settings.messages.balance_unconfirmed.expand({balance: balance, name: user, unconfirmed: unconfirmed_balance - balance}));
-=======
-            client.say(channel, settings.messages.balance_unconfirmed.expand({balance: balance, name: user, unconfirmed: unconfirmed_balance}));
->>>>>>> FETCH_HEAD
           })
         });
         break;
