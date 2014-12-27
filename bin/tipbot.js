@@ -4,6 +4,8 @@ var irc    = require('irc')
 , yaml     = require('js-yaml')
 , coin     = require('node-cannacoin')
 , webadmin = require('../lib/webadmin/app');
+var last_active = {};
+var locks       = [];
 
 // check if the config file exists
 if(!fs.existsSync('./config/config.yml')) {
@@ -149,6 +151,9 @@ client.addListener('error', function(message) {
 });
 
 client.addListener('message', function(from, channel, message) {
+	
+ if(locks.hasOwnProperty(from.toLowerCase()) && locks[from.toLowerCase()]) return;
+  last_active[from] = Date.now();
   var match = message.match(/^(!?)(\S+)/);
   if(match == null) return;
   var prefix  = match[1];
@@ -187,248 +192,373 @@ client.addListener('message', function(from, channel, message) {
       return;
     }
 	switch(command) {
-      case 'rain':
-        var match = message.match(/^.?rain ([\d\.]+) ?(\d+)?/);
-         if(match == null || !match[1]) {
-          client.say(channel, 'Usage: !rain <amount> [max people]');
+    case 'rain':
+      var match = message.match(/^.?rain (random)?([\d\.]+) ?(\d+)?/);
+      if(match == null || !match[2]) {
+        client.say(channel, 'Usage: !rain <amount> [max people]');
+        return;
+      }
+
+      var random = match[1];
+      var amount = Number(match[2]);
+      var max    = Number(match[3]);
+
+      if(isNaN(amount)) {
+        client.say(channel, settings.messages.invalid_amount.expand({name: from, amount: match[2]}));
+        return;
+      }
+
+      if(random) {
+        var min = settings.coin.min_rain;
+        var maxAmount = amount;
+        amount  = Math.floor(Math.random() * (maxAmount - min + 1)) + min;
+      }
+
+      if(isNaN(max) || max < 1) {
+        max = false;
+      } else {
+        max = Math.floor(max);
+      }
+
+      // lock
+      if(locks.hasOwnProperty(from.toLowerCase()) && locks[from.toLowerCase()]) return;
+      locks[from.toLowerCase()] = true;
+
+      coin.getBalance(settings.rpc.prefix + from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
+        if(err) {
+          locks[from.toLowerCase()] = null;
+          winston.error('Error in !tip command.', err);
+          client.say(channel, settings.messages.error.expand({name: from}));
           return;
         }
+        var balance = typeof(balance) == 'object' ? balance.result : balance;
 
-        var amount = Number(match[1]);
-        var max    = Number(match[2]);
+        if(balance >= amount) {
+          client.getNames(channel, function(names) {
+            // rain only on nicknames active within the last x seconds
+            if(settings.commands.rain.rain_on_last_active) {
+              for (var i = names.length - 1; i >= 0; i--) {
+                if(!last_active.hasOwnProperty(names[i]) || last_active[names[i]] + settings.commands.rain.rain_on_last_active * 1000 < Date.now()) {
+                  names.splice(i, 1);
+                }
+              };
+            }
+            // remove tipper from the list
+            names.splice(names.indexOf(from), 1);
+            // shuffle the array
+            for(var j, x, i = names.length; i; j = Math.floor(Math.random() * i), x = names[--i], names[i] = names[j], names[j] = x);
 
-        if(isNaN(amount)) {
-          client.say(channel, settings.messages.invalid_amount.expand({name: from, amount: match[2]}));
-          return;
-        }
+            max = max ? Math.min(max, names.length) : names.length;
+            if(max == 0) return;
+            var whole_channel = false;
+            if(max == names.length) whole_channel = true;
+            names = names.slice(0, max);
 
-        if(isNaN(max) || max < 1) {
-          max = false;
-        }
-        else
-        {
-          max = Math.floor(max);
-        }
-
-        coin.getBalance("irc_"+from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
-          if(err) {
-            winston.error('Error in !tip command.', err);
-            client.say(channel, settings.messages.error.expand({name: from}));
-            return;
-          }
-          var balance = typeof(balance) == 'object' ? balance.result : balance;
-
-          if(balance >= amount) {
-            client.getNames(channel, function(names) {
-              // remove tipper from the list
-              names.splice(names.indexOf(from), 1);
-              // shuffle the array
-              for(var j, x, i = names.length; i; j = Math.floor(Math.random() * i), x = names[--i], names[i] = names[j], names[j] = x);
-
-              max = max ? Math.min(max, names.length) : names.length;
-              if(max == 0) return;
-              var whole_channel = false;
-              if(max == names.length) whole_channel = true;
-              names = names.slice(0, max);
-
-              if(amount / max < settings.coin.min_rain) {
-                client.say(channel, settings.messages.rain_too_small.expand({from: from, amount: amount, min_rain: settings.coin.min_rain * max}));
-                return;
-              }
-
-              for (var i = 0; i < names.length; i++) {
-                coin.move("irc_"+from.toLowerCase(), "irc_"+names[i].toLowerCase(), amount / max, function(err, reply) {
-                  if(err || !reply) {
-                    winston.error('Error in !tip command', err);
-                    return;
-                  }
-                });
-              }
-
-              client.say(channel, settings.messages.rain.expand({name: from, amount: amount / max, list: whole_channel ? 'the whole channel' : names.join(', ')}));
-            });
-          } else {
-            winston.info('%s tried to tip %s %d, but has only %d', from, to, amount, balance);
-            client.say(channel, settings.messages.no_funds.expand({name: from, balance: balance, short: amount - balance, amount: amount}));
-          }
-        })
-        break;
-      case 'tip':
-        var match = message.match(/^.?tip (\S+) ([\d\.]+)/);
-		if(match == null || match.length < 3) {
-          client.say(channel, 'Usage: !tip <nickname> <amount>')
-          return;
-        }
-        var to     = match[1];
-        var amount = Number(match[2]);
-
-        if(isNaN(amount)) {
-          client.say(channel, settings.messages.invalid_amount.expand({name: from, amount: match[2]}));
-          return;
-        }
-
-        if("irc_"+to.toLowerCase() == "irc_"+from.toLowerCase()) {
-          client.say(channel, settings.messages.tip_self.expand({name: from}));
-          return;
-        }
-
-        if(amount < settings.coin.min_tip) {
-          client.say(channel, settings.messages.tip_too_small.expand({from: from, to: to, amount: amount}));
-          return;
-        }
-        // check balance with min. 5 confirmations
-        coin.getBalance("irc_"+from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
-          if(err) {
-            winston.error('Error in !tip command.', err);
-            client.say(channel, settings.messages.error.expand({name: from}));
-            return;
-          }
-          var balance = typeof(balance) == 'object' ? balance.result : balance;
-
-         if(balance >= amount) {
-            coin.send('move', "irc_"+from.toLowerCase(), "irc_"+to.toLowerCase(), amount, function(err, reply) {
-              if(err || !reply) {
-                winston.error('Error in !tip command', err);
-                client.say(channel, settings.messages.error.expand({name: from}));
-                return;
-              }
-              
-              winston.info('%s tipped %s %d%s', from, to, amount, settings.coin.short_name)
-              client.say(channel, settings.messages.tipped.expand({from: from, to: to, amount: amount}));
-            });
-          } else {
-            winston.info('%s tried to tip %s %d, but has only %d', from, to, amount, balance);
-            client.say(channel, settings.messages.no_funds.expand({name: from, balance: balance, short: amount - balance, amount: amount}));
-          }
-        });
-        break;
-        
-      case 'address':
-        var user = "irc_"+from.toLowerCase();
-        client.getAddress(user, function(err, address) {
-          if(err) {
-            winston.error('Error in !address command', err);
-            client.say(channel, settings.messages.error.expand({name: from}));
-            return;
-          }
-		  var user = from.toLowerCase();
-          client.say(channel, settings.messages.deposit_address.expand({name: user, address: address}));
-        });
-        break;
-        
-		case 'diff':
-        coin.getDifficulty(function(err, get_difficulty) {
-          if(err) {
-            winston.error('Error in !getdiff command', err);
-            client.say(channel, settings.messages.error.expand({name: from}));
-            return;
-          }
- 		var get_difficulty = typeof(get_difficulty) == 'object' ? get_difficulty.result : get_difficulty;
-
-        client.say(channel, settings.messages.getdiff.expand({diff: get_difficulty}));
-        });
-        break;
-        
-        case 'networkhps':
-        coin.getnetworkhashps(function(err, get_networkhps) {
-          if(err) {
-            winston.error('Error in !networkhps command', err);
-            client.say(channel, settings.messages.error.expand({name: from}));
-            return;
-          }
- 		var get_networkhps = typeof(get_networkhps) == 'object' ? get_networkhps.result : get_networkhps;
-
-        client.say(channel, settings.messages.networkhps.expand({networkhps: get_networkhps/1000000}));
-        });
-        break;
-         
-      case 'balance':
-        var user = "irc_"+from.toLowerCase();
-        coin.getBalance(user, settings.coin.min_confirmations, function(err, balance) {
-          if(err) {
-            winston.error('Error in !balance command', err);
-            client.say(channel, settings.messages.error.expand({name: from}));
-            return;
-          }
-
-          var balance = typeof(balance) == 'object' ? balance.result : balance;
-
-          coin.getBalance(user, 0, function(err, unconfirmed_balance) {
-          if(err) {
-              winston.error('Error in !balance command', err);
-              client.say(channel, settings.messages.balance.expand({balance: balance, name: user}));
+            if(amount / max < settings.coin.min_rain) {
+              locks[from.toLowerCase()] = null;
+              client.say(channel, settings.messages.rain_too_small.expand({from: from, amount: amount, min_rain: settings.coin.min_rain * max}));
               return;
             }
-			var user = from.toLowerCase();
-            var unconfirmed_balance = typeof(unconfirmed_balance) == 'object' ? unconfirmed_balance.result : unconfirmed_balance;
-            client.say(channel, settings.messages.balance_unconfirmed.expand({balance: balance, name: user, unconfirmed: unconfirmed_balance - balance}));
-          })
-        });
-        break;
 
-      case 'withdraw':
-        var match = message.match(/^.?withdraw (\S+)$/);
-        if(match == null) {
-          client.say(channel, 'Usage: !withdraw <' + settings.coin.full_name + ' address>');
+            for (var i = 0; i < names.length; i++) {
+              coin.move(settings.rpc.prefix + from.toLowerCase(), settings.rpc.prefix + names[i].toLowerCase(), amount / max, function(err, reply) {
+                if(i == names.length) locks[from.toLowerCase()] = null;
+                if(err || !reply) {
+                  winston.error('Error in !tip command', err);
+                  return;
+                }
+              });
+            }
+
+            client.say(channel, settings.messages.rain.expand({name: from, amount: parseFloat((amount / max).toFixed(8)), list: (whole_channel && !settings.commands.rain.rain_on_last_active) ? 'the whole channel' : names.join(', ')}));
+          });
+        } else {
+          winston.info('%s tried to tip %s %d, but has only %d', from, to, amount, balance);
+          client.say(channel, settings.messages.no_funds.expand({name: from, balance: balance, short: amount - balance, amount: amount}));
+        }
+      })
+    break;
+    
+    case 'flip':
+      var match = message.match(/^.?flip ([\d\.]+)/);
+      if(match == null || !match[2]) {
+        client.say(channel, 'Usage: !flip <amount>');
+        return;
+      }
+
+      var random = match[1];
+      var amount = Number(match[2]);
+      var max    = 1;
+
+      if(isNaN(amount)) {
+        client.say(channel, settings.messages.invalid_amount.expand({name: from, amount: match[2]}));
+        return;
+      }
+
+      if(random) {
+        var min = settings.coin.min_rain;
+        var maxAmount = amount;
+        amount  = Math.floor(Math.random() * (maxAmount - min + 1)) + min;
+      }
+
+      if(isNaN(max) || max < 1) {
+        max = false;
+      } else {
+        max = Math.floor(max);
+      }
+
+      // lock
+      if(locks.hasOwnProperty(from.toLowerCase() && locks[from.toLowerCase()])) return;
+      locks[from.toLowerCase()] = true;
+
+      coin.getBalance(settings.rpc.prefix + from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
+        if(err) {
+          locks[from.toLowerCase()] = null;
+          winston.error('Error in !tip command.', err);
+          client.say(channel, settings.messages.error.expand({name: from}));
           return;
         }
-        var address = match[1];
+        var balance = typeof(balance) == 'object' ? balance.result : balance;
 
-        coin.validateAddress(address, function(err, reply) {
-          if(err) {
-            winston.error('Error in !withdraw command', err);
-            client.say(channel, settings.messages.error.expand({name: from}));
+        if(balance >= amount) {
+          client.getNames(channel, function(names) {
+            // rain only on nicknames active within the last x seconds
+            if(settings.commands.rain.rain_on_last_active) {
+              for (var i = names.length - 1; i >= 0; i--) {
+                if(!last_active.hasOwnProperty(names[i]) || last_active[names[i]] + settings.commands.rain.rain_on_last_active * 1000 < Date.now()) {
+                  names.splice(i, 1);
+                }
+              };
+            }
+            // remove tipper from the list
+            names.splice(names.indexOf(from), 1);
+            // shuffle the array
+            for(var j, x, i = names.length; i; j = Math.floor(Math.random() * i), x = names[--i], names[i] = names[j], names[j] = x);
+
+            max = max ? Math.min(max, names.length) : names.length;
+            if(max == 0) return;
+            var whole_channel = false;
+            if(max == names.length) whole_channel = true;
+            names = names.slice(0, max);
+
+            if(amount / max < settings.coin.min_rain) {
+              locks[from.toLowerCase()] = null;
+              client.say(channel, settings.messages.rain_too_small.expand({from: from, amount: amount, min_rain: settings.coin.min_rain * max}));
+              return;
+            }
+
+            for (var i = 0; i < names.length; i++) {
+              coin.move(settings.rpc.prefix + from.toLowerCase(), settings.rpc.prefix + names[i].toLowerCase(), amount / max, function(err, reply) {
+                if(i == names.length) locks[from.toLowerCase()] = null;
+                if(err || !reply) {
+                  winston.error('Error in !tip command', err);
+                  return;
+                }
+              });
+            }
+
+            client.say(channel, settings.messages.rain.expand({name: from, amount: parseFloat((amount / max).toFixed(8)), list: (whole_channel && !settings.commands.rain.rain_on_last_active) ? 'the whole channel' : names.join(', ')}));
+          });
+        } else {
+          winston.info('%s tried to tip %s %d, but has only %d', from, to, amount, balance);
+          client.say(channel, settings.messages.no_funds.expand({name: from, balance: balance, short: amount - balance, amount: amount}));
+        }
+      })
+    break;
+    
+    case 'tip':
+      var match = message.match(/^.?tip (\S+) (random)?([\d\.]+)/);
+      if(match == null || match.length < 3) {
+        client.say(channel, 'Usage: !tip <nickname> <amount>')
+        return;
+      }
+      var to     = match[1];
+      var random = match[2];
+      var amount = Number(match[3]);
+
+      // lock
+      if(locks.hasOwnProperty(from.toLowerCase()) && locks[from.toLowerCase()]) return;
+      locks[from.toLowerCase()] = true;
+
+      if(isNaN(amount)) {
+        locks[from.toLowerCase()] = null;
+        client.say(channel, settings.messages.invalid_amount.expand({name: from, amount: match[3]}));
+        return;
+      }
+
+      if(random) {
+        var min = settings.coin.min_tip;
+        var max = amount;
+        amount  = Math.floor(Math.random() * (max - min + 1)) + min;
+      }
+
+      if(to.toLowerCase() == from.toLowerCase()) {
+        locks[from.toLowerCase()] = null;
+        client.say(channel, settings.messages.tip_self.expand({name: from}));
+        return;
+      }
+
+      if(amount < settings.coin.min_tip) {
+        locks[from.toLowerCase()] = null;
+        client.say(channel, settings.messages.tip_too_small.expand({from: from, to: to, amount: amount}));
+        return;
+      }
+      // check balance with min. 5 confirmations
+      coin.getBalance(settings.rpc.prefix + from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
+        if(err) {
+          locks[from.toLowerCase()] = null;
+          winston.error('Error in !tip command.', err);
+          client.say(channel, settings.messages.error.expand({name: from}));
+          return;
+        }
+        var balance = typeof(balance) == 'object' ? balance.result : balance;
+
+        if(balance >= amount) {
+          coin.send('move', settings.rpc.prefix + from.toLowerCase(), settings.rpc.prefix + to.toLowerCase(), amount, function(err, reply) {
+            locks[from.toLowerCase()] = null;
+            if(err || !reply) {
+              winston.error('Error in !tip command', err);
+              client.say(channel, settings.messages.error.expand({name: from}));
+              return;
+            }
+
+            winston.info('%s tipped %s %d%s', from, to, amount, settings.coin.short_name)
+            client.say(channel, settings.messages.tipped.expand({from: from, to: to, amount: amount}));
+          });
+        } else {
+          locks[from.toLowerCase()] = null;
+          winston.info('%s tried to tip %s %d, but has only %d', from, to, amount, balance);
+          client.say(channel, settings.messages.no_funds.expand({name: from, balance: balance, short: amount - balance, amount: amount}));
+        }
+      });
+    break;
+    
+    case 'address':
+      var user = "irc_"+from.toLowerCase();
+      client.getAddress(user, function(err, address) {
+        if(err) {
+          winston.error('Error in !address command', err);
+          client.say(channel, settings.messages.error.expand({name: from}));
+          return;
+        }
+	    var user = from.toLowerCase();
+        client.say(channel, settings.messages.deposit_address.expand({name: user, address: address}));
+      });
+    break;
+        
+		case 'diff':
+      coin.getDifficulty(function(err, get_difficulty) {
+        if(err) {
+          winston.error('Error in !getdiff command', err);
+          client.say(channel, settings.messages.error.expand({name: from}));
+          return;
+        }
+ 		  var get_difficulty = typeof(get_difficulty) == 'object' ? get_difficulty.result : get_difficulty;
+
+      client.say(channel, settings.messages.getdiff.expand({diff: get_difficulty}));
+      });
+    break;
+        
+    case 'networkhps':
+      coin.getnetworkhashps(function(err, get_networkhps) {
+        if(err) {
+          winston.error('Error in !networkhps command', err);
+          client.say(channel, settings.messages.error.expand({name: from}));
+          return;
+        }
+ 		    var get_networkhps = typeof(get_networkhps) == 'object' ? get_networkhps.result : get_networkhps;
+
+        client.say(channel, settings.messages.networkhps.expand({networkhps: get_networkhps/1000000}));
+      });
+    break;
+         
+    case 'balance':
+      var user = "irc_"+from.toLowerCase();
+      coin.getBalance(user, settings.coin.min_confirmations, function(err, balance) {
+        if(err) {
+          winston.error('Error in !balance command', err);
+          client.say(channel, settings.messages.error.expand({name: from}));
+          return;
+        }
+
+        var balance = typeof(balance) == 'object' ? balance.result : balance;
+
+        coin.getBalance(user, 0, function(err, unconfirmed_balance) {
+        if(err) {
+            winston.error('Error in !balance command', err);
+            client.say(channel, settings.messages.balance.expand({balance: balance, name: user}));
             return;
           }
+		      var user = from.toLowerCase();
+          var unconfirmed_balance = typeof(unconfirmed_balance) == 'object' ? unconfirmed_balance.result : unconfirmed_balance;
+          client.say(channel, settings.messages.balance_unconfirmed.expand({balance: balance, name: user, unconfirmed: unconfirmed_balance - balance}));
+        })
+      });
+    break;
 
-          if(reply.isvalid) {
-            coin.getBalance("irc_"+from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
+    case 'withdraw':
+      var match = message.match(/^.?withdraw (\S+)$/);
+      if(match == null) {
+        client.say(channel, 'Usage: !withdraw <' + settings.coin.full_name + ' address>');
+        return;
+      }
+      var address = match[1];
+
+      coin.validateAddress(address, function(err, reply) {
+        if(err) {
+          winston.error('Error in !withdraw command', err);
+          client.say(channel, settings.messages.error.expand({name: from}));
+          return;
+        }
+
+        if(reply.isvalid) {
+          coin.getBalance("irc_"+from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
+            if(err) {
+              winston.error('Error in !withdraw command', err);
+              client.say(channel, settings.messages.error.expand({name: from}));
+              return;
+            }
+            var balance = typeof(balance) == 'object' ? balance.result : balance;
+
+            if(balance < settings.coin.min_withdraw) {
+              winston.warn('%s tried to withdraw %d, but min is set to %d', from, balance, settings.coin.min_withdraw);
+              client.say(channel, settings.messages.withdraw_too_small.expand({name: from, balance: balance}));
+              return;
+            }
+
+            coin.sendFrom("irc_"+from.toLowerCase(), address, balance - settings.coin.withdrawal_fee, function(err, reply) {
               if(err) {
                 winston.error('Error in !withdraw command', err);
                 client.say(channel, settings.messages.error.expand({name: from}));
                 return;
               }
-              var balance = typeof(balance) == 'object' ? balance.result : balance;
 
-              if(balance < settings.coin.min_withdraw) {
-                winston.warn('%s tried to withdraw %d, but min is set to %d', from, balance, settings.coin.min_withdraw);
-                client.say(channel, settings.messages.withdraw_too_small.expand({name: from, balance: balance}));
-                return;
-              }
+              var values = {name: from, address: address, balance: balance, amount: balance - settings.coin.withdrawal_fee, transaction: reply}
+              for(var i = 0; i < settings.messages.withdraw_success.length; i++) {
+                var msg = settings.messages.withdraw_success[i];
+                client.say(channel, msg.expand(values));
+              };
 
-              coin.sendFrom("irc_"+from.toLowerCase(), address, balance - settings.coin.withdrawal_fee, function(err, reply) {
+              // transfer the rest (usually withdrawal fee - txfee) to bots wallet
+              coin.getBalance("irc_"+from.toLowerCase(), function(err, balance) {
                 if(err) {
-                  winston.error('Error in !withdraw command', err);
-                  client.say(channel, settings.messages.error.expand({name: from}));
+                  winston.error('Something went wrong while transferring fees', err);
                   return;
                 }
 
-                var values = {name: from, address: address, balance: balance, amount: balance - settings.coin.withdrawal_fee, transaction: reply}
-                for(var i = 0; i < settings.messages.withdraw_success.length; i++) {
-                  var msg = settings.messages.withdraw_success[i];
-                  client.say(channel, msg.expand(values));
-                };
+                var balance = typeof(balance) == 'object' ? balance.result : balance;
 
-                // transfer the rest (usually withdrawal fee - txfee) to bots wallet
-                coin.getBalance("irc_"+from.toLowerCase(), function(err, balance) {
-                  if(err) {
-                    winston.error('Something went wrong while transferring fees', err);
-                    return;
-                  }
-
-                  var balance = typeof(balance) == 'object' ? balance.result : balance;
-
-                  // moves the rest to bot's wallet
-                  coin.move("irc_"+from.toLowerCase(), "irc_"+settings.login.nickname.toLowerCase(), balance);
-                });
+                // moves the rest to bot's wallet
+                coin.move("irc_"+from.toLowerCase(), "irc_"+settings.login.nickname.toLowerCase(), balance);
               });
             });
-          } else {
-            winston.warn('%s tried to withdraw to an invalid address', from);
-            client.say(channel, settings.messages.invalid_address.expand({address: address, name: from}));
-          }
-        });
-        break;
+          });
+        } else {
+          winston.warn('%s tried to withdraw to an invalid address', from);
+          client.say(channel, settings.messages.invalid_address.expand({address: address, name: from}));
+        }
+      });
+    break;
     }
   });
 });
