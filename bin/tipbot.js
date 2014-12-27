@@ -151,8 +151,8 @@ client.addListener('error', function(message) {
 });
 
 client.addListener('message', function(from, channel, message) {
-	
- if(locks.hasOwnProperty(from.toLowerCase()) && locks[from.toLowerCase()]) return;
+  
+  if(locks.hasOwnProperty(from.toLowerCase()) && locks[from.toLowerCase()]) return;
   last_active[from] = Date.now();
   var match = message.match(/^(!?)(\S+)/);
   if(match == null) return;
@@ -191,7 +191,7 @@ client.addListener('message', function(from, channel, message) {
       client.say(channel, settings.messages.not_identified.expand({name: from}));
       return;
     }
-	switch(command) {
+  switch(command) {
     case 'rain':
       var match = message.match(/^.?rain (random)?([\d\.]+) ?(\d+)?/);
       if(match == null || !match[2]) {
@@ -308,7 +308,7 @@ client.addListener('message', function(from, channel, message) {
       }
 
       // lock
-      if(locks.hasOwnProperty(from.toLowerCase() && locks[from.toLowerCase()])) return;
+      if(locks.hasOwnProperty(from.toLowerCase()) && locks[from.toLowerCase()]) return;
       locks[from.toLowerCase()] = true;
 
       coin.getBalance(settings.rpc.prefix + from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
@@ -441,19 +441,19 @@ client.addListener('message', function(from, channel, message) {
           client.say(channel, settings.messages.error.expand({name: from}));
           return;
         }
-	    var user = from.toLowerCase();
+      var user = from.toLowerCase();
         client.say(channel, settings.messages.deposit_address.expand({name: user, address: address}));
       });
     break;
         
-		case 'diff':
+    case 'diff':
       coin.getDifficulty(function(err, get_difficulty) {
         if(err) {
           winston.error('Error in !getdiff command', err);
           client.say(channel, settings.messages.error.expand({name: from}));
           return;
         }
- 		  var get_difficulty = typeof(get_difficulty) == 'object' ? get_difficulty.result : get_difficulty;
+      var get_difficulty = typeof(get_difficulty) == 'object' ? get_difficulty.result : get_difficulty;
 
       client.say(channel, settings.messages.getdiff.expand({diff: get_difficulty}));
       });
@@ -466,7 +466,7 @@ client.addListener('message', function(from, channel, message) {
           client.say(channel, settings.messages.error.expand({name: from}));
           return;
         }
- 		    var get_networkhps = typeof(get_networkhps) == 'object' ? get_networkhps.result : get_networkhps;
+        var get_networkhps = typeof(get_networkhps) == 'object' ? get_networkhps.result : get_networkhps;
 
         client.say(channel, settings.messages.networkhps.expand({networkhps: get_networkhps/1000000}));
       });
@@ -489,7 +489,7 @@ client.addListener('message', function(from, channel, message) {
             client.say(channel, settings.messages.balance.expand({balance: balance, name: user}));
             return;
           }
-		      var user = from.toLowerCase();
+          var user = from.toLowerCase();
           var unconfirmed_balance = typeof(unconfirmed_balance) == 'object' ? unconfirmed_balance.result : unconfirmed_balance;
           client.say(channel, settings.messages.balance_unconfirmed.expand({balance: balance, name: user, unconfirmed: unconfirmed_balance - balance}));
         })
