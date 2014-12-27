@@ -18,6 +18,7 @@ rpc:
   port: 7142
   user: rpcuser
   pass: rpcpass
+  prefix: irc_
 coin:
   withdrawal_fee: .1 
   min_withdraw: 1
